@@ -1,5 +1,5 @@
 # %% [markdown]
-# # ***Arboles de decisión***
+# # ***Random Forest***
 
 # %%
 import os 
@@ -9,6 +9,7 @@ import networkx as nx
 import matplotlib.pyplot as plt
 import mysql.connector
 import itertools
+import pickle
 from sqlalchemy import create_engine
 
 # %% [markdown]
@@ -22,32 +23,6 @@ cursor.execute('USE RanSap_v1')
 
 # %%
 engine = create_engine('mysql+mysqlconnector://root:root@localhost/RanSap_V1')
-
-# %%
-q_benigno = "SELECT * FROM escritura WHERE `Tipo de Archivo` = 'benigno' LIMIT 15000;"
-q_ransomware = "SELECT * FROM escritura WHERE `Tipo de Archivo` = 'ransomware' LIMIT 15000;"
-
-
-# %% [markdown]
-# ##### Los Queries son agregados a una variable para formar 2 dataframes llamados df_benigno para software no malicioso y df_ransomware para software malicioso para después concatenar ambos dataframes 
-
-# %%
-df_benigno = pd.read_sql_query(q_benigno, engine)
-
-# %%
-df_benigno
-
-# %%
-df_ransomware = pd.read_sql_query(q_ransomware, engine)
-
-# %%
-df_ransomware
-
-# %%
-df_total = pd.concat([df_benigno, df_ransomware], ignore_index=True)
-
-# %%
-df_total
 
 # %% [markdown]
 # ### Entropia 
@@ -67,8 +42,6 @@ def entropia(y):
     else:
         raise('El Objeto debe ser una serie de Pandas')
 
-entropia(df_total['Tipo de Archivo'])
-
 # %% [markdown]
 # ### Information Gain 
 # ##### Esta métrica indica la mejora al hacer diferentes particiones y se suele utilizar con la entropía
@@ -82,10 +55,14 @@ def varianza(y):
     ''' Función para ayudar a calcular la varianza evitando nan.
         y: variable para calcular la varianza. Debería ser una serie Pandas.'''
     
-    if(len(y) == 1):
-        return 0
+    if y.dtype != 'object':  # Asegurarse de que los datos son numéricos
+        if(len(y) == 1):
+            return 0
+        else:
+            return y.var()
     else:
-        return y.var()
+        return 0  # Devolver 0 si los datos no son numéricos
+    
 
 # %%
 def information_gain(y, mascara, func=entropia):
@@ -106,9 +83,6 @@ def information_gain(y, mascara, func=entropia):
         else:
             ig = func(y) - a/(a+b)*func(y[mascara]) - b/(a+b)*func(y[-mascara])
     return ig
-
-# %%
-information_gain(df_total['Entropia_de_Shannon'], df_total['Tipo de Archivo'] == 'ransomware')
 
 # %% [markdown]
 # ### Mejor Split
@@ -173,9 +147,6 @@ def max_information_gain_split(x, y, func=entropia):
         return(best_ig, best_split, variable_numerica, True)
     
 
-
-# %%
-df_total.drop('Entropia_de_Shannon', axis= 1).apply(max_information_gain_split, y = df_total['Entropia_de_Shannon'])
 
 # %%
 def mejor_split(y, data):
@@ -254,6 +225,7 @@ def train_tree(data,y, target_factor, max_depth = None,min_samples_split = None,
       depth_cond = True
     else:
       depth_cond = False
+
   if min_samples_split == None:
       sample_cond = True
   else:
@@ -261,6 +233,7 @@ def train_tree(data,y, target_factor, max_depth = None,min_samples_split = None,
         sample_cond = True
       else:
         sample_cond = False
+        
   if depth_cond & sample_cond:
 
     var,val,ig,var_type = mejor_split(y, data)
@@ -293,15 +266,96 @@ def train_tree(data,y, target_factor, max_depth = None,min_samples_split = None,
 
 
 
-max_depth = 5
-min_samples_split = 20
-min_information_gain  = 1e-5
+# %%
+'''
+# Definir los hiperparámetros que quieres ajustar
+max_depth_values = [None, 10, 20, 30]
+min_samples_split_values = [2, 5, 10]
+min_information_gain_values = [1e-20, 1e-10, 1e-5]
+'''
+max_depth = 30
+min_samples_split = 10
+min_information_gain  = 1e-10
+
+# %%
+try:
+    with open('modelC.pkl', 'rb') as file:
+        loaded_model, loaded_counter = pickle.load(file)
+    print("Modelo y contador cargados desde 'modelC.pkl'")
+    # Ahora puedes usar 'loaded_model' en lugar de 'forest' y 'loaded_counter' en lugar de 'contador'
+    forest = loaded_model
+    contador = loaded_counter
+except FileNotFoundError:
+    print("Archivo 'modelC.pkl' no encontrado. Se creará un nuevo modelo y contador.")
+    forest = []  # Inicializa un nuevo bosque
+    contador = 0  # Inicializa un nuevo contador
+
+# %%
+contador
+
+# %%
+# Definir el tamaño del lote
+batch_size = 25000  # Ajusta este número según la capacidad de la máquina
+
+# Definir el número total de registros que se desea procesar
+total_records = 100000  
+
+# Calcular el número total de lotes
+total_batches = int(total_records / (2 * batch_size))
+
+totalMuestras = 0
 
 
-decisiones = train_tree(df_total,'Entropia_de_Shannon',True, max_depth,min_samples_split,min_information_gain)
+# %%
+from sklearn.preprocessing import LabelEncoder
+
+# Crear el codificador
+le = LabelEncoder()
+
+# %%
+
+# Procesar los datos en lotes
+for i in range(total_batches):
+    # Leer un lote de datos benignos
+    query_benigno = "SELECT * FROM escritura WHERE `Tipo de Archivo` = 'benigno' ORDER BY RAND() LIMIT %d;" % (batch_size)
+    batch_benigno = pd.read_sql_query(query_benigno, engine)
+
+    # Leer un lote de datos de ransomware
+    query_ransomware = "SELECT * FROM escritura WHERE `Tipo de Archivo` = 'ransomware' ORDER BY RAND() LIMIT %d;" % (batch_size)
+    batch_ransomware = pd.read_sql_query(query_ransomware, engine)
+
+    # Concatenar los lotes
+    batch = pd.concat([batch_benigno, batch_ransomware], ignore_index=True)
+
+    batch['Tipo de Archivo'] = le.fit_transform(batch['Tipo de Archivo'])
+
+    # Incrementar el contador por el tamaño del lote
+    contador += (2*batch_size)
+
+    # Imprimir el contador
+    print("Número de registros por procesar: ", (2*batch_size))
+
+    totalMuestras += contador
+
+    # Entrenar el árbol de decisión en el lote de datos
+    decision_tree = train_tree(batch, 'Tipo de Archivo', True, max_depth, min_samples_split, min_information_gain)
+
+    # Imprimir el contador
+    print("Número de registros procesados hasta ahora: ", contador)
+    
+    # Agregar el árbol de decisión al bosque
+    forest.append(decision_tree)
 
 
-decisiones
+# %%
+# Guardar el modelo y el contador después de procesar todos los lotes
+with open('modelC.pkl', 'wb') as file:
+    pickle.dump((forest, contador), file)
+
+print("Modelo y contador guardados en 'modelC.pkl' después de procesar todos los lotes")
+
+# %%
+forest
 
 # %%
 def add_edges(graph, parent_node, tree_dict, counter):
@@ -332,71 +386,130 @@ def plot_tree(decision_tree):
     nx.draw(G, pos, labels=labels, with_labels=True, arrows=False)
     plt.show()
 
-# Asumiendo que 'decisiones' es tu árbol de decisión
-plot_tree(decisiones)
+# Para cada árbol en el bosque
+for i, tree in enumerate(forest):
+    print(f"Árbol {i+1}:")
+    plot_tree(tree)
+    print("\n")  # Agrega una línea en blanco entre cada árbol
+
 
 
 # %%
+import re
+
 def clasificar_datos(observacion, arbol):
   question = list(arbol.keys())[0]
-  if "<=" in question:
-    name, _, value = question.partition(" <= ")
-    if observacion[name] <= float(value):
+
+  # Utilizar una expresión regular para dividir la cadena 'question'
+  match = re.match(r'(.*) (<=|>) (.*)', question)
+  column_name, operator, value = match.groups()
+
+  # Verificar si 'observacion[column_name]' es un número
+  try:
+    obs_value = float(observacion[column_name])
+    value = float(value)
+  except ValueError:
+    obs_value = observacion[column_name]
+    value = value
+
+  if operator == '<=':
+    if obs_value <= value:
       answer = arbol[question][0]
     else:
       answer = arbol[question][1]
   else:
-    name, _, value = question.partition(" in ")
-    value = eval(value)
-    if observacion[name] in value:
+    if obs_value == value:
       answer = arbol[question][0]
     else:
       answer = arbol[question][1]
 
+  # Si la respuesta no es un diccionario
   if not isinstance(answer, dict):
     return answer
   else:
+    residual_tree = answer
     return clasificar_datos(observacion, answer)
 
 
 # %%
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+# %%
+
+# Definir el tamaño del lote para cada tipo de datos
+muestra_real = 10  # Ajusta este número según la capacidad de la maquina
+
+q_real = "SELECT * FROM escritura ORDER BY RAND() LIMIT %d;" % muestra_real
+df_real = pd.read_sql_query(q_real, engine)
+
+'''
+# Leer un lote de datos benignos
+q_benigno = "SELECT * FROM escritura WHERE `Tipo de Archivo` = 'benigno' ORDER BY RAND() LIMIT %d;" % muestra_real
+real_benigno = pd.read_sql_query(q_benigno, engine)
+
+# Leer un lote de datos de ransomware
+q_ransomware = "SELECT * FROM escritura WHERE `Tipo de Archivo` = 'ransomware' ORDER BY RAND() LIMIT %d;" % muestra_real
+real_ransomware = pd.read_sql_query(q_ransomware, engine)
+
+# Concatenar los lotes
+df_real = pd.concat([real_benigno, real_ransomware], ignore_index=True) '''
+
+# %%
+#df_real.to_csv('muestra_real.csv', index=False)
+
+# %%
+# df_real = pd.read_csv('muestra_real.csv') 
+
+# %%
+df_real
+
+# %%
+# Obtener las etiquetas verdaderas de los datos
+y_true = df_real['Tipo de Archivo'].tolist()
+
+# Crear un objeto LabelEncoder
+le = LabelEncoder()
+
+# Ajustar el LabelEncoder a los datos
+le.fit(y_true)
+
+y_true_encoded = le.transform(y_true)
+
 predictions = []
-for i in range(len(df_total)):
-  obs_pred = clasificar_datos(df_total.iloc[i,:], decisiones)
-  predictions.append(obs_pred)
+for i in range(len(df_real)):
+    # Hacer una predicción con cada árbol
+    tree_predictions = [clasificar_datos(df_real.iloc[i,:], tree) for tree in forest]
+    
+    # Usar la votación para obtener la predicción final
+    obs_pred = max(set(tree_predictions), key=tree_predictions.count)
+    
+    predictions.append(obs_pred)
 
+# Transformar las predicciones numéricas a las etiquetas originales
+predictions_labels = le.inverse_transform(predictions)
+
+for pred in predictions_labels:
+    if pred == 'benigno':
+        print("La predicción es benigna.")
+    elif pred == 'ransomware':
+        print("La predicción es ransomware.")
+    else:
+        print("Etiqueta desconocida.")
+
+accuracy = accuracy_score(y_true_encoded, predictions)
+precision = precision_score(y_true_encoded, predictions)
+recall = recall_score(y_true_encoded, predictions)
+f1 = f1_score(y_true_encoded, predictions)
+
+print("Accuracy: ", accuracy)
+print("Precision: ", precision)
+print("Recall: ", recall)
+print("F1 Score: ", f1)
 
 
 # %%
-from sklearn.metrics import mean_squared_error
-from sklearn.metrics import mean_squared_error
-from sklearn.metrics import mean_absolute_error
-from sklearn.metrics import r2_score
-
-# %%
-# Primero, obtén las etiquetas verdaderas de tus datos
-y_true = df_total['Entropia_de_Shannon'].tolist()
-
-# Luego, usa tu árbol de decisión para hacer predicciones en tus datos
-y_pred = [clasificar_datos(df_total.iloc[i,:], decisiones) for i in range(len(df_total))]
-
-# Ahora, puedes calcular el MSE
-mse = mean_squared_error(y_true, y_pred)
-
-print("El error cuadrático medio del modelo es: ", mse)
-
-rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-print("El RMSE del modelo es: ", rmse)
-
-mae = mean_absolute_error(y_true, y_pred)
-print("El MAE del modelo es: ", mae)
-
-r2 = r2_score(y_true, y_pred)
-print("El R^2 del modelo es: ", r2)
-
-# %%
-print("Predicciones: ", y_pred)
-print("Verdaderas: ", y_true)
+print("Predicciones: ", predictions)
+print("Verdaderas: ", y_true_encoded)
 print(" ")
 
 
